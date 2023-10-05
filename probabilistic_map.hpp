@@ -1,7 +1,7 @@
 #pragma once
 
-#include "bonxai/bonxai.hpp"
-#include <eigen3/Eigen/Geometry>
+#include "bonxai.hpp"
+#include <Eigen/Geometry>
 #include <unordered_set>
 
 namespace Bonxai
@@ -56,10 +56,16 @@ public:
     int32_t update_id : 4;
     // the probability of the cell to be occupied
     int32_t probability_log : 28;
+    // the previous probability of the cell to be occupied for tracking change
+    int32_t prev_probability_free_log : 28;
+    // the previous probability of the cell to be occupied for tracking change
+    int32_t prev_probability_occupied_log : 28;
 
     CellT()
       : update_id(0)
-      , probability_log(UnknownProbability){};
+      , probability_log(UnknownProbability)
+      , prev_probability_occupied_log(UnknownProbability)
+      , prev_probability_free_log(UnknownProbability){};
   };
 
   /// These default values are the same as OctoMap
@@ -124,12 +130,52 @@ public:
 
   void getFreeVoxels(std::vector<Bonxai::CoordT>& coords);
 
+  void getNewFreeVoxelsAndReset(std::vector<Bonxai::CoordT>& coords);
+
+  void getNewOccupiedVoxelsAndReset(std::vector<Bonxai::CoordT>& coords);
+
   template <typename PointT>
   void getOccupiedVoxels(std::vector<PointT>& points)
   {
     thread_local std::vector<Bonxai::CoordT> coords;
     coords.clear();
     getOccupiedVoxels(coords);
+    for (const auto& coord : coords)
+    {
+      const auto p = _grid.coordToPos(coord);
+      points.emplace_back(p.x, p.y, p.z);
+    }
+  }
+  template <typename PointT>
+  void getFreeVoxels(std::vector<PointT>& points)
+  {
+    thread_local std::vector<Bonxai::CoordT> coords;
+    coords.clear();
+    getFreeVoxels(coords);
+    for (const auto& coord : coords)
+    {
+      const auto p = _grid.coordToPos(coord);
+      points.emplace_back(p.x, p.y, p.z);
+    }
+  }
+  template <typename PointT>
+  void getNewFreeVoxelsAndReset(std::vector<PointT>& points)
+  {
+    thread_local std::vector<Bonxai::CoordT> coords;
+    coords.clear();
+    getNewFreeVoxelsAndReset(coords);
+    for (const auto& coord : coords)
+    {
+      const auto p = _grid.coordToPos(coord);
+      points.emplace_back(p.x, p.y, p.z);
+    }
+  }
+  template <typename PointT>
+  void getNewOccupiedVoxelsAndReset(std::vector<PointT>& points)
+  {
+    thread_local std::vector<Bonxai::CoordT> coords;
+    coords.clear();
+    getNewOccupiedVoxelsAndReset(coords);
     for (const auto& coord : coords)
     {
       const auto p = _grid.coordToPos(coord);
@@ -231,6 +277,207 @@ void RayIterator(const CoordT& key_origin,
       return;
     }
   }
+}
+
+}  // namespace Bonxai
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+namespace Bonxai
+{
+
+const int32_t ProbabilisticMap::UnknownProbability = ProbabilisticMap::logods(0.5f);
+
+
+
+VoxelGrid<ProbabilisticMap::CellT>& ProbabilisticMap::grid()
+{
+  return _grid;
+}
+
+ProbabilisticMap::ProbabilisticMap(double resolution)
+  : _grid(resolution)
+  , _accessor(_grid.createAccessor())
+{}
+
+const VoxelGrid<ProbabilisticMap::CellT>& ProbabilisticMap::grid() const
+{
+  return _grid;
+}
+
+const ProbabilisticMap::Options& ProbabilisticMap::options() const
+{
+  return _options;
+}
+
+void ProbabilisticMap::setOptions(const Options& options)
+{
+  _options = options;
+}
+
+void ProbabilisticMap::addHitPoint(const Vector3D &point)
+{
+  const auto coord = _grid.posToCoord(point);
+  CellT* cell = _accessor.value(coord, true);
+
+  if (cell->update_id != _update_count)
+  {
+    cell->probability_log = std::min(cell->probability_log + _options.prob_hit_log,
+                                     _options.clamp_max_log);
+    cell->prev_probability_free_log = cell->probability_log;
+
+    cell->update_id = _update_count;
+    _hit_coords.push_back(coord);
+  }
+}
+
+void ProbabilisticMap::addMissPoint(const Vector3D &point)
+{
+  const auto coord = _grid.posToCoord(point);
+  CellT* cell = _accessor.value(coord, true);
+
+  if (cell->update_id != _update_count)
+  {
+    cell->probability_log = std::max(
+        cell->probability_log + _options.prob_miss_log, _options.clamp_min_log);
+    cell->prev_probability_occupied_log = cell->probability_log;
+
+    cell->update_id = _update_count;
+    _miss_coords.push_back(coord);
+  }
+}
+
+bool ProbabilisticMap::isOccupied(const CoordT &coord) const
+{
+  if(auto* cell = _accessor.value(coord, false))
+  {
+    return cell->probability_log > _options.occupancy_threshold_log;
+  }
+  return false;
+}
+
+bool ProbabilisticMap::isUnknown(const CoordT &coord) const
+{
+  if(auto* cell = _accessor.value(coord, false))
+  {
+    return cell->probability_log == _options.occupancy_threshold_log;
+  }
+  return true;
+}
+
+bool ProbabilisticMap::isFree(const CoordT &coord) const
+{
+  if(auto* cell = _accessor.value(coord, false))
+  {
+    return cell->probability_log < _options.occupancy_threshold_log;
+  }
+  return false;
+}
+
+void Bonxai::ProbabilisticMap::updateFreeCells(const Vector3D& origin)
+{
+  auto accessor = _grid.createAccessor();
+
+  // same as addMissPoint, but using lambda will force inlining
+  auto clearPoint = [this, &accessor](const CoordT& coord)
+  {
+    CellT* cell = accessor.value(coord, true);
+    if (cell->update_id != _update_count)
+    {
+      cell->probability_log = std::max(
+          cell->probability_log + _options.prob_miss_log, _options.clamp_min_log);
+      cell->update_id = _update_count;
+    }
+    return true;
+  };
+
+  const auto coord_origin = _grid.posToCoord(origin);
+
+  for (const auto& coord_end : _hit_coords)
+  {
+    RayIterator(coord_origin, coord_end, clearPoint);
+  }
+  _hit_coords.clear();
+
+  for (const auto& coord_end : _miss_coords)
+  {
+    RayIterator(coord_origin, coord_end, clearPoint);
+  }
+  _miss_coords.clear();
+
+  if (++_update_count == 4)
+  {
+    _update_count = 1;
+  }
+}
+
+void ProbabilisticMap::getOccupiedVoxels(std::vector<CoordT>& coords)
+{
+  coords.clear();
+  auto visitor = [&](CellT& cell, const CoordT& coord) {
+    if (cell.probability_log > _options.occupancy_threshold_log)
+    {
+      coords.push_back(coord);
+    }
+  };
+  _grid.forEachCell(visitor);
+}
+
+void ProbabilisticMap::getFreeVoxels(std::vector<CoordT>& coords)
+{
+  coords.clear();
+  auto visitor = [&](CellT& cell, const CoordT& coord) {
+    if (cell.probability_log < _options.occupancy_threshold_log)
+    {
+      coords.push_back(coord);
+    }
+  };
+  _grid.forEachCell(visitor);
+}
+
+void ProbabilisticMap::getNewFreeVoxelsAndReset(std::vector<CoordT>& coords)
+{
+  coords.clear();
+  auto visitor = [&](CellT& cell, const CoordT& coord) {
+    if (cell.probability_log < _options.occupancy_threshold_log) // now free
+    {
+      if (cell.prev_probability_free_log >= _options.occupancy_threshold_log) // but, not free before
+      {
+        cell.prev_probability_free_log = cell.probability_log;
+        coords.push_back(coord);
+      }
+    }
+  };
+  _grid.forEachCell(visitor);
+}
+
+void ProbabilisticMap::getNewOccupiedVoxelsAndReset(std::vector<CoordT>& coords)
+{
+  coords.clear();
+  auto visitor = [&](CellT& cell, const CoordT& coord) {
+    if (cell.probability_log > _options.occupancy_threshold_log) // now occupied
+    {
+      if (cell.prev_probability_occupied_log <= _options.occupancy_threshold_log) // but, not occupied before
+      {
+        cell.prev_probability_occupied_log = cell.probability_log;
+        coords.push_back(coord);
+      }
+    }
+  };
+  _grid.forEachCell(visitor);
 }
 
 }  // namespace Bonxai
