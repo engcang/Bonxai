@@ -71,8 +71,8 @@ public:
   /// These default values are the same as OctoMap
   struct Options
   {
-    int32_t prob_miss_log = logods(0.4f);
-    int32_t prob_hit_log = logods(0.7f);
+    int32_t prob_miss_log = logods(0.45f);
+    int32_t prob_hit_log = logods(0.65f);
 
     int32_t clamp_min_log = logods(0.12f);
     int32_t clamp_max_log = logods(0.97f);
@@ -399,6 +399,7 @@ void Bonxai::ProbabilisticMap::updateFreeCells(const Vector3D& origin)
     {
       cell->probability_log = std::max(
           cell->probability_log + _options.prob_miss_log, _options.clamp_min_log);
+      cell->prev_probability_occupied_log = cell->probability_log;
       cell->update_id = _update_count;
     }
     return true;
