@@ -285,6 +285,9 @@ public:
    */
   VoxelGrid(double voxel_size, uint8_t inner_bits = 2, uint8_t leaf_bits = 3);
 
+  /// @brief clear all to save memory
+  void Clear() { std::unordered_map<CoordT, InnerGrid>().swap(root_map); }
+
   /// @brief getMemoryUsage returns the amount of bytes used by this data structure
   [[nodiscard]] size_t memUsage() const;
 

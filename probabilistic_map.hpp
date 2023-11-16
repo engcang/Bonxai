@@ -84,6 +84,8 @@ public:
 
   ProbabilisticMap(double resolution);
 
+  void Clear() { _grid.Clear(); }
+
   [[nodiscard]] VoxelGrid<CellT>& grid();
 
   [[nodiscard]] const VoxelGrid<CellT>& grid() const;
