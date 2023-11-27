@@ -122,6 +122,12 @@ public:
   // Once finished adding points, you must call updateFreeCells()
   void addMissPoint(const Vector3D& point);
 
+  /**
+   * @brief raycast along the direction around the collision radius from the origin
+   */
+  template <typename PointT>
+  void rayCastPointRadius(const PointT& origin_pt, const PointT& direction, const double& max_range, const double& collision_radius, std::vector<PointT>& casted_points);
+
   [[nodiscard]] bool isOccupied(const Bonxai::CoordT& coord) const;
 
   [[nodiscard]] bool isUnknown(const Bonxai::CoordT& coord) const;
@@ -196,6 +202,8 @@ private:
   mutable Bonxai::VoxelGrid<CellT>::Accessor _accessor;
 
   void updateFreeCells(const Vector3D& origin);
+  template <typename PointT>
+  bool rayCastPoint(const CoordT& origin, const CoordT& end, PointT& casted_point);
 };
 
 //--------------------------------------------------
@@ -481,6 +489,84 @@ void ProbabilisticMap::getNewOccupiedVoxelsAndReset(std::vector<CoordT>& coords)
     }
   };
   _grid.forEachCell(visitor);
+}
+
+template <typename PointT>
+bool ProbabilisticMap::rayCastPoint(const CoordT& origin, const CoordT& end, PointT& casted_point)
+{
+  if (origin == end)
+  {
+    return false;
+  }
+
+  CoordT error = { 0, 0, 0 };
+  CoordT delta = (end - origin);
+  CoordT coord = origin;
+  const CoordT step = { delta.x < 0 ? -1 : 1,
+                        delta.y < 0 ? -1 : 1,
+                        delta.z < 0 ? -1 : 1 };
+  delta = { delta.x < 0 ? -delta.x : delta.x,
+            delta.y < 0 ? -delta.y : delta.y,
+            delta.z < 0 ? -delta.z : delta.z };
+
+  // maximum change of any coordinate
+  const int max = std::max(std::max(delta.x, delta.y), delta.z);
+  for (int i = 0; i < max - 1; ++i)
+  {
+    // update errors
+    error = error + delta;
+    // manual loop unrolling
+    if ((error.x << 1) >= max)
+    {
+      coord.x += step.x;
+      error.x -= max;
+    }
+    if ((error.y << 1) >= max)
+    {
+      coord.y += step.y;
+      error.y -= max;
+    }
+    if ((error.z << 1) >= max)
+    {
+      coord.z += step.z;
+      error.z -= max;
+    }
+    if(isOccupied(coord))
+    {
+      casted_point = ConvertPoint<PointT>(_grid.coordToPos(coord));
+      return true;
+    }
+  }
+  return false;
+}
+
+template <typename PointT>
+void ProbabilisticMap::rayCastPointRadius(const PointT& origin_pt, const PointT& direction, const double& max_range, const double& collision_radius, std::vector<PointT>& casted_points)
+{
+  std::vector<PointT>().swap(casted_points);
+  const Vector3D origin_vec3d_ = ConvertPoint<Vector3D>(origin_pt);
+  const CoordT origin_coord_ = _grid.posToCoord(origin_vec3d_);
+  const Vector3D direction_vec3d_ = ConvertPoint<Vector3D>(direction).normalized() * max_range;
+  const Vector3D min_bound_ = origin_vec3d_.array() - collision_radius;
+  const Vector3D max_bound_ = origin_vec3d_.array() + collision_radius;
+  const CoordT min_bound_coord_ = _grid.posToCoord(min_bound_);
+  const CoordT max_bound_coord_ = _grid.posToCoord(max_bound_);
+
+  for (int32_t i = min_bound_coord_.x; i < max_bound_coord_.x+1; i++)
+  {
+    for (int32_t j = min_bound_coord_.y; j < max_bound_coord_.y+1; j++)
+    {
+      PointT casted_point_;
+      CoordT radius_origin_coord_ = { i, j, origin_coord_.z };
+      Vector3D end_vec3d_ = ConvertPoint<Vector3D>(_grid.coordToPos(radius_origin_coord_)) + direction_vec3d_;
+      if (rayCastPoint(radius_origin_coord_, _grid.posToCoord(end_vec3d_), casted_point_))
+      {
+        casted_points.push_back(casted_point_);
+      }
+    }
+  }
+
+  return;
 }
 
 }  // namespace Bonxai

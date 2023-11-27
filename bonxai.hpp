@@ -10,6 +10,7 @@
 #pragma once
 
 #include <array>
+#include <vector>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
