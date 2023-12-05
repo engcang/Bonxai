@@ -126,7 +126,7 @@ public:
    * @brief raycast along the direction around the collision radius from the origin
    */
   template <typename PointT>
-  void rayCastPointRadius(const PointT& origin_pt, const PointT& direction, const double& max_range, const double& collision_radius, std::vector<PointT>& casted_points);
+  void rayCastPointRadius(const PointT& origin_pt, const PointT& direction, const double& max_range, const double& collision_radius, std::vector<PointT>& casted_points, double& valid_ratio);
 
   [[nodiscard]] bool isOccupied(const Bonxai::CoordT& coord) const;
 
@@ -574,7 +574,7 @@ void ProbabilisticMap::rayCastPointRadius(const PointT& origin_pt, const PointT&
   }
   else
   {
-    valid_ratio = casted_points.size() / counter_;
+    valid_ratio = casted_points.size() / (double)counter_;
   }
   return;
 }
