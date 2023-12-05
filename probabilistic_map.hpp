@@ -541,31 +541,41 @@ bool ProbabilisticMap::rayCastPoint(const CoordT& origin, const CoordT& end, Poi
 }
 
 template <typename PointT>
-void ProbabilisticMap::rayCastPointRadius(const PointT& origin_pt, const PointT& direction, const double& max_range, const double& collision_radius, std::vector<PointT>& casted_points)
+void ProbabilisticMap::rayCastPointRadius(const PointT& origin_pt, const PointT& direction, const double& max_range, const double& collision_radius, std::vector<PointT>& casted_points, double& valid_ratio)
 {
   std::vector<PointT>().swap(casted_points);
   const Vector3D origin_vec3d_ = ConvertPoint<Vector3D>(origin_pt);
   const CoordT origin_coord_ = _grid.posToCoord(origin_vec3d_);
   const Vector3D direction_vec3d_ = ConvertPoint<Vector3D>(direction).normalized() * max_range;
+  const CoordT direction_coord_ = _grid.posToCoord(direction_vec3d_);
   const Vector3D min_bound_ = origin_vec3d_.array() - collision_radius;
   const Vector3D max_bound_ = origin_vec3d_.array() + collision_radius;
   const CoordT min_bound_coord_ = _grid.posToCoord(min_bound_);
   const CoordT max_bound_coord_ = _grid.posToCoord(max_bound_);
 
+  int counter_ = 0;
   for (int32_t i = min_bound_coord_.x; i < max_bound_coord_.x+1; i++)
   {
     for (int32_t j = min_bound_coord_.y; j < max_bound_coord_.y+1; j++)
     {
+      counter_++;
       PointT casted_point_;
       CoordT radius_origin_coord_ = { i, j, origin_coord_.z };
-      Vector3D end_vec3d_ = ConvertPoint<Vector3D>(_grid.coordToPos(radius_origin_coord_)) + direction_vec3d_;
-      if (rayCastPoint(radius_origin_coord_, _grid.posToCoord(end_vec3d_), casted_point_))
+      CoordT end_coord_ = (radius_origin_coord_ + direction_coord_);
+      if (rayCastPoint(radius_origin_coord_, end_coord_, casted_point_))
       {
         casted_points.push_back(casted_point_);
       }
     }
   }
-
+  if (counter_ == 0)
+  {
+    valid_ratio = 0.0;
+  }
+  else
+  {
+    valid_ratio = casted_points.size() / counter_;
+  }
   return;
 }
 
