@@ -117,22 +117,22 @@ public:
   // Once finished adding points, you must call updateFreeCells()
   void addMissPoint(const Vector3D& point);
 
-  [[nodiscard]] bool isOccupied(const Bonxai::CoordT& coord) const;
+  [[nodiscard]] bool isOccupied(const CoordT& coord) const;
 
-  [[nodiscard]] bool isUnknown(const Bonxai::CoordT& coord) const;
+  [[nodiscard]] bool isUnknown(const CoordT& coord) const;
 
-  [[nodiscard]] bool isFree(const Bonxai::CoordT& coord) const;
+  [[nodiscard]] bool isFree(const CoordT& coord) const;
 
-  void getOccupiedVoxels(std::vector<Bonxai::CoordT>& coords);
+  void getOccupiedVoxels(std::vector<CoordT>& coords);
 
-  void getFreeVoxels(std::vector<Bonxai::CoordT>& coords);
+  void getFreeVoxels(std::vector<CoordT>& coords);
 
-  void getNewFreeVoxelsAndReset(std::vector<Bonxai::CoordT>& coords);
+  void getNewFreeVoxelsAndReset(std::vector<CoordT>& coords);
 
   template <typename PointT>
   void getOccupiedVoxels(std::vector<PointT>& points)
   {
-    thread_local std::vector<Bonxai::CoordT> coords;
+    thread_local std::vector<CoordT> coords;
     coords.clear();
     getOccupiedVoxels(coords);
     for (const auto& coord : coords)
@@ -144,7 +144,7 @@ public:
   template <typename PointT>
   void getFreeVoxels(std::vector<PointT>& points)
   {
-    thread_local std::vector<Bonxai::CoordT> coords;
+    thread_local std::vector<CoordT> coords;
     coords.clear();
     getFreeVoxels(coords);
     for (const auto& coord : coords)
@@ -156,7 +156,7 @@ public:
   template <typename PointT>
   void getNewFreeVoxelsAndReset(std::vector<PointT>& points)
   {
-    thread_local std::vector<Bonxai::CoordT> coords;
+    thread_local std::vector<CoordT> coords;
     coords.clear();
     getNewFreeVoxelsAndReset(coords);
     for (const auto& coord : coords)
