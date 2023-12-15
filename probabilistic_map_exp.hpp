@@ -1,8 +1,9 @@
 #pragma once
 
-#include "bonxai.hpp"
 #include <Eigen/Geometry>
 #include <unordered_set>
+#include "bonxai.hpp"
+#include "ikd_Tree.h"
 
 namespace Bonxai
 {
@@ -25,12 +26,12 @@ namespace Bonxai
   }
 
   /**
-   * @brief The ProbabilisticMap class is meant to behave as much as possible as
+   * @brief The ProbabilisticMapExploration class is meant to behave as much as possible as
    * octomap::Octree, given the same voxel size.
    *
    * Insert a point cloud to update the current probability
    */
-  class ProbabilisticMap
+  class ProbabilisticMapExploration
   {
   public:
     using Vector3D = Eigen::Vector3d;
@@ -81,7 +82,9 @@ namespace Bonxai
 
     static const int32_t UnknownProbability;
 
-    ProbabilisticMap(const double& resolution);
+    ProbabilisticMapExploration(const double& resolution, const bool& use_frontier = false, 
+                      const double& collision_radius = 0.5, const double& max_range = 5.0, 
+                      const std::vector<double>& map_bound = std::vector<double>());
 
     void Clear() { _grid.Clear(); }
 
@@ -107,7 +110,7 @@ namespace Bonxai
     template <typename PointT, typename Allocator>
     void insertPointCloud(const std::vector<PointT, Allocator>& points,
                           const PointT& origin,
-                          double max_range);
+                          const double& max_range);
     // This function is usually called by insertPointCloud
     // We expose it here to add more control to the user.
     // Once finished adding points, you must call updateFreeCells()
@@ -117,12 +120,6 @@ namespace Bonxai
     // Once finished adding points, you must call updateFreeCells()
     void addMissPoint(const Vector3D& point);
 
-    /**
-     * @brief raycast along the direction around the collision radius from the origin
-     */
-    template <typename PointT>
-    void rayCastPointRadius(const PointT& origin_pt, const PointT& direction, const double& max_range, const double& collision_radius, std::vector<PointT>& casted_points, double& valid_ratio);
-
     [[nodiscard]] bool isOccupied(const CoordT& coord) const;
     [[nodiscard]] bool isUnknown(const CoordT& coord) const;
     [[nodiscard]] bool isFree(const CoordT& coord) const;
@@ -131,6 +128,10 @@ namespace Bonxai
     void getFreeVoxels(std::vector<CoordT>& coords);
     void getNewFreeVoxelsAndReset(std::vector<CoordT>& coords);
     void getNewOccupiedVoxelsAndReset(std::vector<CoordT>& coords);
+    void getNewFrontiersAndSave(std::vector<CoordT>& coords, std::shared_ptr<KD_TREE<PointType_Coverage>> ikdtree);
+    void getAllFrontiers(std::vector<CoordT>& coords) { coords = _saved_frontier_coords; }
+    template <typename PointT>
+    void updateSavedFrontiers(const PointT& origin, std::shared_ptr<KD_TREE<PointType_Coverage>> ikdtree);
 
     template <typename PointT>
     void getOccupiedVoxels(std::vector<PointT>& points)
@@ -180,28 +181,57 @@ namespace Bonxai
         points.emplace_back(p.x, p.y, p.z);
       }
     }
+    template <typename PointT>
+    void getNewFrontiersAndSave(std::vector<PointT>& points, std::shared_ptr<KD_TREE<PointType_Coverage>> ikdtree)
+    {
+      thread_local std::vector<CoordT> coords;
+      coords.clear();
+      getNewFrontiersAndSave(coords, ikdtree);
+      for (const auto& coord : coords)
+      {
+        const auto p = _grid.coordToPos(coord);
+        points.emplace_back(p.x, p.y, p.z);
+      }
+    }
+    template <typename PointT>
+    void getAllFrontiers(std::vector<PointT>& points)
+    {
+      for (const auto& coord : _saved_frontier_coords)
+      {
+        const auto p = _grid.coordToPos(coord);
+        points.emplace_back(p.x, p.y, p.z);
+      }
+    }
 
   private:
     VoxelGrid<CellT> _grid;
     Options _options;
     uint8_t _update_count = 1;
+    bool _use_frontier;
+    double _collision_radius;
+    double _max_range;
+    double _max_range_sq;
+    std::vector<CoordT> _map_bound;
 
     std::vector<CoordT> _miss_coords;
     std::vector<CoordT> _hit_coords;
+    std::vector<CoordT> _new_free_coords; //for frontier detection
+    std::vector<CoordT> _saved_frontier_coords; //global frontier
+    std::vector<CoordT> _neighbor_coord_set; //for frontier, never changed
 
     mutable Bonxai::VoxelGrid<CellT>::Accessor _accessor;
 
     void updateFreeCells(const Vector3D& origin);
-    template <typename PointT>
-    bool rayCastPoint(const CoordT& origin, const CoordT& end, PointT& casted_point);
+    bool ifFrontier(const CoordT& coord, std::shared_ptr<KD_TREE<PointType_Coverage>> ikdtree);
+    bool ifStillFrontier(const CoordT& coord, std::shared_ptr<KD_TREE<PointType_Coverage>> ikdtree);
   };
 
   //--------------------------------------------------
 
   template <typename PointT, typename Alloc>
-  inline void ProbabilisticMap::insertPointCloud(const std::vector<PointT, Alloc>& points,
+  inline void ProbabilisticMapExploration::insertPointCloud(const std::vector<PointT, Alloc>& points,
                                                 const PointT& origin,
-                                                double max_range)
+                                                const double& max_range)
   {
     const auto from = ConvertPoint<Vector3D>(origin);
     const double max_range_sqr = max_range * max_range;
@@ -279,6 +309,65 @@ namespace Bonxai
     }
   }
 
+  bool ProbabilisticMapExploration::ifFrontier(const CoordT& coord, std::shared_ptr<KD_TREE<PointType_Coverage>> ikdtree)
+  {
+    if (coord.x < _map_bound[0].x || coord.y < _map_bound[0].y || coord.z < _map_bound[0].z)
+    {
+      return false;
+    }
+    if (coord.x > _map_bound[1].x || coord.y > _map_bound[1].y || coord.z > _map_bound[1].z)
+    {
+      return false;
+    }
+    const auto pos_ = _grid.coordToPos(coord);
+    if (ikdtree->CollisionCheck(PointType_Coverage(pos_.x, pos_.y, pos_.z), _collision_radius))
+    {
+      return false;
+    }
+    bool if_frontier = false;
+    for (const CoordT& neighbor_coord : _neighbor_coord_set)
+    {
+      const CoordT neighbor_coord_ = { coord.x + neighbor_coord.x, coord.y + neighbor_coord.y, coord.z + neighbor_coord.z };
+      // if (isOccupied(neighbor_coord_))
+      // {
+      //   if_frontier = false;
+      //   break;
+      // }
+      if (isUnknown(neighbor_coord_))
+      {
+        if_frontier = true;
+        break;
+      }
+    }
+    return if_frontier;
+  }
+  bool ProbabilisticMapExploration::ifStillFrontier(const CoordT& coord, std::shared_ptr<KD_TREE<PointType_Coverage>> ikdtree)
+  {
+    const auto pos_ = _grid.coordToPos(coord);
+    if (ikdtree->CollisionCheck(PointType_Coverage(pos_.x, pos_.y, pos_.z), _collision_radius))
+    {
+      return false;
+    }
+    bool if_frontier = false;
+    if (isFree(coord))
+    {
+      for (const CoordT& neighbor_coord : _neighbor_coord_set)
+      {
+        const CoordT neighbor_coord_ = { coord.x + neighbor_coord.x, coord.y + neighbor_coord.y, coord.z + neighbor_coord.z };
+        // if (isOccupied(neighbor_coord_))
+        // {
+        //   if_frontier = false;
+        //   break;
+        // }
+        if (isUnknown(neighbor_coord_))
+        {
+          if_frontier = true;
+          break;
+        }
+      }
+    }
+    return if_frontier;
+  }
 }  // namespace Bonxai
 
 
@@ -287,35 +376,63 @@ namespace Bonxai
 
 namespace Bonxai
 {
-  const int32_t ProbabilisticMap::UnknownProbability = ProbabilisticMap::logods(0.5f);
+  const int32_t ProbabilisticMapExploration::UnknownProbability = ProbabilisticMapExploration::logods(0.5f);
 
-  VoxelGrid<ProbabilisticMap::CellT>& ProbabilisticMap::grid()
+  VoxelGrid<ProbabilisticMapExploration::CellT>& ProbabilisticMapExploration::grid()
   {
     return _grid;
   }
 
-  ProbabilisticMap::ProbabilisticMap(const double& resolution)
+  ProbabilisticMapExploration::ProbabilisticMapExploration(const double& resolution, const bool& use_frontier,
+                                                        const double& collision_radius, const double& max_range,
+                                                        const std::vector<double>& map_bound)
     : _grid(resolution)
     , _accessor(_grid.createAccessor())
-  {}
+    , _use_frontier(use_frontier)
+    , _collision_radius(collision_radius)
+    , _max_range(max_range)
+    , _max_range_sq(max_range * max_range)
+  {
+    if (map_bound.size() == 6)
+    {
+      _map_bound = { _grid.posToCoord(Vector3D(map_bound[0], map_bound[1], map_bound[2])), 
+                     _grid.posToCoord(Vector3D(map_bound[3], map_bound[4], map_bound[5]))};
+    }
+    else
+    {
+      _map_bound = { {-100, -100, -100}, {100, 100, 100} };
+    }
+    if (use_frontier)
+    {
+      _neighbor_coord_set = { {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1} };
+      // _neighbor_coord_set = { {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1},
+      //                         {1, 1, 0}, {-1, 1, 0}, {1, -1, 0}, {-1, -1, 0}, {1, 0, 1}, {-1, 0, 1},
+      //                         {1, 0, -1}, {-1, 0, -1}, {0, 1, 1}, {0, -1, 1}, {0, 1, -1}, {0, -1, -1} };
+      // _neighbor_coord_set = { {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1},
+      //                         {1, 1, 0}, {-1, 1, 0}, {1, -1, 0}, {-1, -1, 0}, {1, 0, 1}, {-1, 0, 1},
+      //                         {1, 0, -1}, {-1, 0, -1}, {0, 1, 1}, {0, -1, 1}, {0, 1, -1}, {0, -1, -1},
+      //                         {1, 1, 1}, {-1, 1, 1}, {1, -1, 1}, {1, 1, -1}, {-1, -1, 1}, {-1, 1, -1},
+      //                         {1, -1, -1}, {-1, -1, -1} };
+    }
+  }
 
-  const VoxelGrid<ProbabilisticMap::CellT>& ProbabilisticMap::grid() const
+  const VoxelGrid<ProbabilisticMapExploration::CellT>& ProbabilisticMapExploration::grid() const
   {
     return _grid;
   }
 
-  const ProbabilisticMap::Options& ProbabilisticMap::options() const
+  const ProbabilisticMapExploration::Options& ProbabilisticMapExploration::options() const
   {
     return _options;
   }
 
-  void ProbabilisticMap::setOptions(const Options& options)
+  void ProbabilisticMapExploration::setOptions(const Options& options)
   {
     _options = options;
     return;
   }
 
-  void ProbabilisticMap::addHitPoint(const Vector3D &point)
+  void ProbabilisticMapExploration::addHitPoint(const Vector3D &point)
   {
     const auto coord = _grid.posToCoord(point);
     CellT* cell = _accessor.value(coord, true);
@@ -329,10 +446,9 @@ namespace Bonxai
       cell->update_id = _update_count;
       _hit_coords.push_back(coord);
     }
-    return;
   }
 
-  void ProbabilisticMap::addMissPoint(const Vector3D &point)
+  void ProbabilisticMapExploration::addMissPoint(const Vector3D &point)
   {
     const auto coord = _grid.posToCoord(point);
     CellT* cell = _accessor.value(coord, true);
@@ -346,10 +462,9 @@ namespace Bonxai
       cell->update_id = _update_count;
       _miss_coords.push_back(coord);
     }
-    return;
   }
 
-  bool ProbabilisticMap::isOccupied(const CoordT &coord) const
+  bool ProbabilisticMapExploration::isOccupied(const CoordT &coord) const
   {
     if(auto* cell = _accessor.value(coord, false))
     {
@@ -358,7 +473,7 @@ namespace Bonxai
     return false;
   }
 
-  bool ProbabilisticMap::isUnknown(const CoordT &coord) const
+  bool ProbabilisticMapExploration::isUnknown(const CoordT &coord) const
   {
     if(auto* cell = _accessor.value(coord, false))
     {
@@ -367,7 +482,7 @@ namespace Bonxai
     return true;
   }
 
-  bool ProbabilisticMap::isFree(const CoordT &coord) const
+  bool ProbabilisticMapExploration::isFree(const CoordT &coord) const
   {
     if(auto* cell = _accessor.value(coord, false))
     {
@@ -376,7 +491,7 @@ namespace Bonxai
     return false;
   }
 
-  void Bonxai::ProbabilisticMap::updateFreeCells(const Vector3D& origin)
+  void Bonxai::ProbabilisticMapExploration::updateFreeCells(const Vector3D& origin)
   {
     auto accessor = _grid.createAccessor();
 
@@ -412,10 +527,9 @@ namespace Bonxai
     {
       _update_count = 1;
     }
-    return;
   }
 
-  void ProbabilisticMap::getOccupiedVoxels(std::vector<CoordT>& coords)
+  void ProbabilisticMapExploration::getOccupiedVoxels(std::vector<CoordT>& coords)
   {
     coords.clear();
     auto visitor = [&](CellT& cell, const CoordT& coord) {
@@ -425,10 +539,9 @@ namespace Bonxai
       }
     };
     _grid.forEachCell(visitor);
-    return;
   }
 
-  void ProbabilisticMap::getFreeVoxels(std::vector<CoordT>& coords)
+  void ProbabilisticMapExploration::getFreeVoxels(std::vector<CoordT>& coords)
   {
     coords.clear();
     auto visitor = [&](CellT& cell, const CoordT& coord) {
@@ -438,10 +551,9 @@ namespace Bonxai
       }
     };
     _grid.forEachCell(visitor);
-    return;
   }
 
-  void ProbabilisticMap::getNewFreeVoxelsAndReset(std::vector<CoordT>& coords)
+  void ProbabilisticMapExploration::getNewFreeVoxelsAndReset(std::vector<CoordT>& coords)
   {
     coords.clear();
     auto visitor = [&](CellT& cell, const CoordT& coord) {
@@ -455,10 +567,18 @@ namespace Bonxai
       }
     };
     _grid.forEachCell(visitor);
+
+    if (_use_frontier)
+    {
+      for (const auto& coord : coords)
+      {
+        _new_free_coords.push_back(coord);
+      }
+    }
     return;
   }
 
-  void ProbabilisticMap::getNewOccupiedVoxelsAndReset(std::vector<CoordT>& coords)
+  void ProbabilisticMapExploration::getNewOccupiedVoxelsAndReset(std::vector<CoordT>& coords)
   {
     coords.clear();
     auto visitor = [&](CellT& cell, const CoordT& coord) {
@@ -472,95 +592,42 @@ namespace Bonxai
       }
     };
     _grid.forEachCell(visitor);
+  }
+
+  void ProbabilisticMapExploration::getNewFrontiersAndSave(std::vector<CoordT>& coords, std::shared_ptr<KD_TREE<PointType_Coverage>> ikdtree)
+  {
+    for (const CoordT& coord : _new_free_coords)
+    {
+      if (ifFrontier(coord, ikdtree))
+      {
+        coords.push_back(coord);
+        _saved_frontier_coords.push_back(coord);
+      }
+    }
+    std::vector<CoordT>().swap(_new_free_coords); //clear
     return;
   }
 
   template <typename PointT>
-  bool ProbabilisticMap::rayCastPoint(const CoordT& origin, const CoordT& end, PointT& casted_point)
+  void ProbabilisticMapExploration::updateSavedFrontiers(const PointT& origin, std::shared_ptr<KD_TREE<PointType_Coverage>> ikdtree)
   {
-    if (origin == end)
+    const Vector3D origin_vec3d_ = ConvertPoint<Vector3D>(origin);
+    std::vector<CoordT> new_saved_frontier_coords_;
+    for (const CoordT& coord : _saved_frontier_coords)
     {
-      return false;
-    }
-
-    CoordT error = { 0, 0, 0 };
-    CoordT delta = (end - origin);
-    CoordT coord = origin;
-    const CoordT step = { delta.x < 0 ? -1 : 1,
-                          delta.y < 0 ? -1 : 1,
-                          delta.z < 0 ? -1 : 1 };
-    delta = { delta.x < 0 ? -delta.x : delta.x,
-              delta.y < 0 ? -delta.y : delta.y,
-              delta.z < 0 ? -delta.z : delta.z };
-
-    // maximum change of any coordinate
-    const int max = std::max(std::max(delta.x, delta.y), delta.z);
-    for (int i = 0; i < max - 1; ++i)
-    {
-      // update errors
-      error = error + delta;
-      // manual loop unrolling
-      if ((error.x << 1) >= max)
+      const Vector3D coord_vec3d_ = ConvertPoint<Vector3D>(_grid.coordToPos(coord));
+      if ((coord_vec3d_ - origin_vec3d_).squaredNorm() > _max_range_sq)
       {
-        coord.x += step.x;
-        error.x -= max;
+        new_saved_frontier_coords_.push_back(coord);
       }
-      if ((error.y << 1) >= max)
+      else if (ifStillFrontier(coord, ikdtree))
       {
-        coord.y += step.y;
-        error.y -= max;
-      }
-      if ((error.z << 1) >= max)
-      {
-        coord.z += step.z;
-        error.z -= max;
-      }
-      if(isOccupied(coord))
-      {
-        casted_point = ConvertPoint<PointT>(_grid.coordToPos(coord));
-        return true;
+        new_saved_frontier_coords_.push_back(coord);
       }
     }
-    return false;
-  }
-
-  template <typename PointT>
-  void ProbabilisticMap::rayCastPointRadius(const PointT& origin_pt, const PointT& direction, const double& max_range, const double& collision_radius, std::vector<PointT>& casted_points, double& valid_ratio)
-  {
-    std::vector<PointT>().swap(casted_points);
-    const Vector3D origin_vec3d_ = ConvertPoint<Vector3D>(origin_pt);
-    const CoordT origin_coord_ = _grid.posToCoord(origin_vec3d_);
-    const Vector3D direction_vec3d_ = ConvertPoint<Vector3D>(direction).normalized() * max_range;
-    const CoordT direction_coord_ = _grid.posToCoord(direction_vec3d_);
-    const Vector3D min_bound_ = origin_vec3d_.array() - collision_radius;
-    const Vector3D max_bound_ = origin_vec3d_.array() + collision_radius;
-    const CoordT min_bound_coord_ = _grid.posToCoord(min_bound_);
-    const CoordT max_bound_coord_ = _grid.posToCoord(max_bound_);
-
-    int counter_ = 0;
-    for (int32_t i = min_bound_coord_.x; i < max_bound_coord_.x+1; i++)
-    {
-      for (int32_t j = min_bound_coord_.y; j < max_bound_coord_.y+1; j++)
-      {
-        counter_++;
-        PointT casted_point_;
-        CoordT radius_origin_coord_ = { i, j, origin_coord_.z };
-        CoordT end_coord_ = (radius_origin_coord_ + direction_coord_);
-        if (rayCastPoint(radius_origin_coord_, end_coord_, casted_point_))
-        {
-          casted_points.push_back(casted_point_);
-        }
-      }
-    }
-    if (counter_ == 0)
-    {
-      valid_ratio = 0.0;
-    }
-    else
-    {
-      valid_ratio = casted_points.size() / (double)counter_;
-    }
+    _saved_frontier_coords = new_saved_frontier_coords_;
     return;
-  }
+  }  
+
 
 }  // namespace Bonxai
