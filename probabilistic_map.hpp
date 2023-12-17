@@ -107,7 +107,7 @@ namespace Bonxai
     template <typename PointT, typename Allocator>
     void insertPointCloud(const std::vector<PointT, Allocator>& points,
                           const PointT& origin,
-                          double max_range);
+                          const double& max_range);
     // This function is usually called by insertPointCloud
     // We expose it here to add more control to the user.
     // Once finished adding points, you must call updateFreeCells()
@@ -143,6 +143,7 @@ namespace Bonxai
         const auto p = _grid.coordToPos(coord);
         points.emplace_back(p.x, p.y, p.z);
       }
+      return;
     }
     template <typename PointT>
     void getFreeVoxels(std::vector<PointT>& points)
@@ -155,6 +156,7 @@ namespace Bonxai
         const auto p = _grid.coordToPos(coord);
         points.emplace_back(p.x, p.y, p.z);
       }
+      return;
     }
     template <typename PointT>
     void getNewFreeVoxelsAndReset(std::vector<PointT>& points)
@@ -167,6 +169,19 @@ namespace Bonxai
         const auto p = _grid.coordToPos(coord);
         points.emplace_back(p.x, p.y, p.z);
       }
+      return;
+    }
+    template <typename PointT>
+    void getNewFreeVoxelsAndReset(std::vector<PointT>& points, std::vector<CoordT>& coords)
+    {
+      coords.clear();
+      getNewFreeVoxelsAndReset(coords);
+      for (const auto& coord : coords)
+      {
+        const auto p = _grid.coordToPos(coord);
+        points.emplace_back(p.x, p.y, p.z);
+      }
+      return;
     }
     template <typename PointT>
     void getNewOccupiedVoxelsAndReset(std::vector<PointT>& points)
@@ -179,6 +194,7 @@ namespace Bonxai
         const auto p = _grid.coordToPos(coord);
         points.emplace_back(p.x, p.y, p.z);
       }
+      return;
     }
 
   private:
@@ -201,7 +217,7 @@ namespace Bonxai
   template <typename PointT, typename Alloc>
   inline void ProbabilisticMap::insertPointCloud(const std::vector<PointT, Alloc>& points,
                                                 const PointT& origin,
-                                                double max_range)
+                                                const double& max_range)
   {
     const auto from = ConvertPoint<Vector3D>(origin);
     const double max_range_sqr = max_range * max_range;
@@ -277,6 +293,7 @@ namespace Bonxai
         return;
       }
     }
+    return;
   }
 
 }  // namespace Bonxai
