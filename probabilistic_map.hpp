@@ -56,9 +56,9 @@ namespace Bonxai
       // the probability of the cell to be occupied
       int32_t probability_log : 28;
       // the previous probability of the cell to be occupied for tracking change
-      int32_t prev_probability_free_log : 28;
-      // the previous probability of the cell to be occupied for tracking change
       int32_t prev_probability_occupied_log : 28;
+      // the previous probability of the cell to be occupied for tracking change
+      int32_t prev_probability_free_log : 28;
 
       CellT()
         : update_id(0)
