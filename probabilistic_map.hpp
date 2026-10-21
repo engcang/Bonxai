@@ -44,14 +44,18 @@ class ProbabilisticMap {
     int32_t probability_log : 28;
     // the previous probability of the cell to be occupied for tracking change
     int32_t prev_probability_occupied_log : 28;
+    int32_t queued_occupied : 2;
     // the previous probability of the cell to be occupied for tracking change
     int32_t prev_probability_free_log : 28;
+    int32_t queued_free : 2;
 
     CellT()
         : update_id(0),
           probability_log(UnknownProbability),
           prev_probability_occupied_log(UnknownProbability),
-          prev_probability_free_log(UnknownProbability){};
+          queued_occupied(0),
+          prev_probability_free_log(UnknownProbability),
+          queued_free(0){};
   };
 
   /// These default values are the same as OctoMap
@@ -80,6 +84,9 @@ class ProbabilisticMap {
         _ray_targets(std::move(other._ray_targets)),
         _traversed_cells(std::move(other._traversed_cells)),
         _miss_before(std::move(other._miss_before)),
+        _pending_free(std::move(other._pending_free)),
+        _pending_occupied(std::move(other._pending_occupied)),
+        _external_grid_access(other._external_grid_access),
         _accessor(_grid.createAccessor()) {}
 
   ProbabilisticMap& operator=(ProbabilisticMap&& other) {
@@ -89,6 +96,9 @@ class ProbabilisticMap {
       _ray_targets = std::move(other._ray_targets);
       _traversed_cells = std::move(other._traversed_cells);
       _miss_before = std::move(other._miss_before);
+      _pending_free = std::move(other._pending_free);
+      _pending_occupied = std::move(other._pending_occupied);
+      _external_grid_access = _external_grid_access || other._external_grid_access;
     }
     return *this;
   }
@@ -99,6 +109,8 @@ class ProbabilisticMap {
     _ray_targets.clear();
     _traversed_cells.clear();
     _miss_before.clear();
+    _pending_free.clear();
+    _pending_occupied.clear();
     _grid.Clear();
   }
 
@@ -151,7 +163,8 @@ class ProbabilisticMap {
 
   void getOccupiedVoxels(std::vector<CoordT>& coords);
   void getFreeVoxels(std::vector<CoordT>& coords);
-  void getNewFreeVoxelsAndReset(std::vector<CoordT>& coords);
+  void getNewFreeVoxelsAndReset(std::vector<CoordT>& coords,
+                              std::vector<CoordT>* removed_occupied = nullptr);
   void getNewOccupiedVoxelsAndReset(std::vector<CoordT>& coords);
 
   template <typename PointT>
@@ -177,13 +190,22 @@ class ProbabilisticMap {
     return;
   }
   template <typename PointT>
-  void getNewFreeVoxelsAndReset(std::vector<PointT>& points) {
+  void getNewFreeVoxelsAndReset(std::vector<PointT>& points,
+                              std::vector<PointT>* removed_occupied = nullptr) {
     thread_local std::vector<CoordT> coords;
+    thread_local std::vector<CoordT> removed;
     coords.clear();
-    getNewFreeVoxelsAndReset(coords);
+    getNewFreeVoxelsAndReset(coords, removed_occupied ? &removed : nullptr);
     for (const auto& coord : coords) {
       const auto p = _grid.coordToPos(coord);
       points.emplace_back(p.x, p.y, p.z);
+    }
+    if (removed_occupied) {
+      removed_occupied->clear();
+      for (const auto& coord : removed) {
+        const auto p = _grid.coordToPos(coord);
+        removed_occupied->emplace_back(p.x, p.y, p.z);
+      }
     }
     return;
   }
@@ -213,7 +235,23 @@ class ProbabilisticMap {
   VoxelGrid<CellT> _grid;
   Options _options;
   std::vector<std::pair<CoordT, CellT*>> _ray_targets;
-  std::vector<CellT*> _traversed_cells;
+  std::vector<std::pair<CoordT, CellT*>> _traversed_cells;
+  std::vector<std::pair<CoordT, CellT*>> _pending_free;
+  std::vector<std::pair<CoordT, CellT*>> _pending_occupied;
+  //Codex: A retained mutable grid reference can bypass observation tracking.
+  bool _external_grid_access = false;
+
+  void trackTransition(const CoordT& coord, CellT* cell) {
+    const auto threshold = _options.occupancy_threshold_log;
+    if (cell->probability_log < threshold && cell->prev_probability_free_log >= threshold && !cell->queued_free) {
+      cell->queued_free = 1;
+      _pending_free.emplace_back(coord, cell);
+    }
+    if (cell->probability_log > threshold && cell->prev_probability_occupied_log <= threshold && !cell->queued_occupied) {
+      cell->queued_occupied = 1;
+      _pending_occupied.emplace_back(coord, cell);
+    }
+  }
 
   // addHitPoint/addMissPoint keep updating immediately, as in this fork.
   // Snapshot miss endpoints so a later hit in the same scan can replace the
@@ -254,7 +292,10 @@ inline void ProbabilisticMap::insertPointCloud(const std::vector<PointT, Alloc>&
 namespace Bonxai {
 inline const int32_t ProbabilisticMap::UnknownProbability = ProbabilisticMap::logods(0.5f);
 
-inline VoxelGrid<ProbabilisticMap::CellT>& ProbabilisticMap::grid() { return _grid; }
+inline VoxelGrid<ProbabilisticMap::CellT>& ProbabilisticMap::grid() {
+  _external_grid_access = true;
+  return _grid;
+}
 
 inline ProbabilisticMap::ProbabilisticMap(const double& resolution)
     : _grid(resolution), _accessor(_grid.createAccessor()) {}
@@ -264,6 +305,9 @@ inline const VoxelGrid<ProbabilisticMap::CellT>& ProbabilisticMap::grid() const 
 inline const ProbabilisticMap::Options& ProbabilisticMap::options() const { return _options; }
 
 inline void ProbabilisticMap::setOptions(const Options& options) {
+  if (_options.occupancy_threshold_log != options.occupancy_threshold_log) {
+    _external_grid_access = true;
+  }
   _options = options;
   return;
 }
@@ -283,7 +327,8 @@ inline void ProbabilisticMap::addHitPoint(const Vector3D& point) {
   }
   cell->probability_log =
       std::min(cell->probability_log + _options.prob_hit_log, _options.clamp_max_log);
-  cell->prev_probability_free_log = cell->probability_log;
+  //Codex: A weak hit while still free must not erase a pending occupied-to-free event.
+  cell->prev_probability_free_log = std::max(cell->prev_probability_free_log, cell->probability_log);
   cell->update_id = CellT::kHit;
 }
 
@@ -295,7 +340,7 @@ inline void ProbabilisticMap::addMissPoint(const Vector3D& point) {
     _ray_targets.emplace_back(coord, cell);
     cell->probability_log =
         std::max(cell->probability_log + _options.prob_miss_log, _options.clamp_min_log);
-    cell->prev_probability_occupied_log = cell->probability_log;
+    cell->prev_probability_occupied_log = std::min(cell->prev_probability_occupied_log, cell->probability_log);
     cell->update_id = CellT::kMiss;
   }
 }
@@ -327,10 +372,10 @@ inline void ProbabilisticMap::updateFreeCells(const Vector3D& origin) {
   auto clearPoint = [this, &accessor, &options](const CoordT& coord) {
     CellT* cell = accessor.value(coord, true);
     if (cell->update_id == CellT::kUnseen) {
-      _traversed_cells.push_back(cell);
+      _traversed_cells.emplace_back(coord, cell);
       cell->probability_log =
           std::max(cell->probability_log + options.prob_miss_log, options.clamp_min_log);
-      cell->prev_probability_occupied_log = cell->probability_log;
+      cell->prev_probability_occupied_log = std::min(cell->prev_probability_occupied_log, cell->probability_log);
       cell->update_id = CellT::kMiss;
     }
     return true;
@@ -346,10 +391,12 @@ inline void ProbabilisticMap::updateFreeCells(const Vector3D& origin) {
   }
   // No wrapping scan counter: cells are always unseen again between scans.
   for (const auto& target : _ray_targets) {
+    trackTransition(target.first, target.second);
     target.second->update_id = CellT::kUnseen;
   }
-  for (auto* cell : _traversed_cells) {
-    cell->update_id = CellT::kUnseen;
+  for (const auto& item : _traversed_cells) {
+    trackTransition(item.first, item.second);
+    item.second->update_id = CellT::kUnseen;
   }
   _ray_targets.clear();
   _traversed_cells.clear();
@@ -378,26 +425,44 @@ inline void ProbabilisticMap::getFreeVoxels(std::vector<CoordT>& coords) {
   return;
 }
 
-inline void ProbabilisticMap::getNewFreeVoxelsAndReset(std::vector<CoordT>& coords) {
+inline void ProbabilisticMap::getNewFreeVoxelsAndReset(std::vector<CoordT>& coords,
+                                                    std::vector<CoordT>* removed_occupied) {
   coords.clear();
+  if (removed_occupied) {
+    removed_occupied->clear();
+  }
   auto visitor = [&](CellT& cell, const CoordT& coord) {
+    cell.queued_free = 0;
     if (cell.probability_log < _options.occupancy_threshold_log)  // now free
     {
       if (cell.prev_probability_free_log >=
           _options.occupancy_threshold_log)  // but, not free before
       {
+        //Codex: Newly observed free space does not remove an obstacle witness.
+        //Codex: Preserve the pre-consumption state, including delayed free consumption.
+        if (removed_occupied && (_external_grid_access || cell.prev_probability_free_log > _options.occupancy_threshold_log)) {
+          removed_occupied->push_back(coord);
+        }
         cell.prev_probability_free_log = cell.probability_log;
         coords.push_back(coord);
       }
     }
   };
-  _grid.forEachCell(visitor);
+  if (_external_grid_access) {
+    _grid.forEachCell(visitor);
+  } else {
+    for (const auto& item : _pending_free) {
+      visitor(*item.second, item.first);
+    }
+  }
+  _pending_free.clear();
   return;
 }
 
 inline void ProbabilisticMap::getNewOccupiedVoxelsAndReset(std::vector<CoordT>& coords) {
   coords.clear();
   auto visitor = [&](CellT& cell, const CoordT& coord) {
+    cell.queued_occupied = 0;
     if (cell.probability_log > _options.occupancy_threshold_log)  // now occupied
     {
       if (cell.prev_probability_occupied_log <=
@@ -408,7 +473,14 @@ inline void ProbabilisticMap::getNewOccupiedVoxelsAndReset(std::vector<CoordT>& 
       }
     }
   };
-  _grid.forEachCell(visitor);
+  if (_external_grid_access) {
+    _grid.forEachCell(visitor);
+  } else {
+    for (const auto& item : _pending_occupied) {
+      visitor(*item.second, item.first);
+    }
+  }
+  _pending_occupied.clear();
   return;
 }
 
